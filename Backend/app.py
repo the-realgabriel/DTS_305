@@ -3,8 +3,10 @@ import joblib
 import pandas as pd
 import numpy as np
 from utils import build_features
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # enable CORS for all routes
 
 # Load PKL model
 model = joblib.load("models/forecast_model.pkl")
