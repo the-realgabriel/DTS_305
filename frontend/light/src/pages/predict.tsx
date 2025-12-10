@@ -25,17 +25,15 @@ export default function Predict(){
     const [voltage, setVoltage] = useState('230')
     const [current, setCurrent] = useState('10')
 
-    const SEQUENCE_LENGTH = 2
+    const SEQUENCE_LENGTH = 24
 
     async function fetchWeatherByCoords(lat: number, lon: number) {
         try {
-            // Using a free weather API that doesn't require API key
             const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code&temperature_unit=celsius&wind_speed_unit=ms`
             const res = await fetch(url)
             if (!res.ok) throw new Error(`Weather API error ${res.status}`)
             const data = await res.json()
             
-            // Map weather codes to descriptions
             const weatherDescriptions: Record<number, string> = {
                 0: 'Clear sky',
                 1: 'Mainly clear',
@@ -71,7 +69,6 @@ export default function Predict(){
                 raw: data
             }
             
-            // Use reverse geocoding to get location name
             try {
                 const geoUrl = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`
                 const geoRes = await fetch(geoUrl, {
@@ -113,7 +110,7 @@ export default function Predict(){
                 }
                 setFetchingWeather(false)
             },
-            (err) => {
+            (err: GeolocationPositionError) => {
                 if (err.code === err.PERMISSION_DENIED) {
                     setLocationPermission('denied')
                     setError('Location access denied. Please enable location permissions in your browser settings.')
@@ -159,9 +156,10 @@ export default function Predict(){
         }
         
         checkPermissionAndFetch()
-    }, [])
+    }, [autoLocation])
 
-    async function handleSubmit() {
+    async function handleSubmit(e: React.FormEvent) {
+        e.preventDefault()
         setError(null)
         setPrediction(null)
 
@@ -202,7 +200,8 @@ export default function Predict(){
                 }
             })
 
-            const res = await fetch('http://127.0.0.1:8000/predict', {
+            // Send data to backend
+            const res = await fetch('http://localhost:5050/predict', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(dataPoints),
@@ -215,7 +214,7 @@ export default function Predict(){
                 const msg = data?.error || `Request failed (status ${res.status})`
                 setError(msg)
             } else {
-                const pred = data?.predicted_energy_kwh
+                const pred = data?.prediction
                 if (typeof pred === 'number' || !Number.isNaN(Number(pred))) {
                     setPrediction(Number(pred))
                 } else {
@@ -235,7 +234,7 @@ export default function Predict(){
                 {/* Header */}
                 <div className="text-center mb-8">
                     <h1 className="text-5xl font-bold text-white mb-2">Energy Forecast Dashboard</h1>
-                    <p className="text-blue-100">Hybrid AI-powered energy consumption predictions (LSTM + Random Forest + GBT)</p>
+                    <p className="text-blue-100">Hybrid Model energy consumption predictions (LSTM + Random Forest + GBT)</p>
                 </div>
 
                 {/* Main Grid */}
@@ -256,7 +255,7 @@ export default function Predict(){
                                             disabled={fetchingWeather}
                                             className="text-xs bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg transition-all disabled:opacity-50"
                                         >
-                                            {fetchingWeather ? '🔄' : '↻ Refresh'}
+                                            {fetchingWeather ? '' : '↻ Refresh'}
                                         </button>
                                     </div>
                                 )}
@@ -285,17 +284,17 @@ export default function Predict(){
                             <div className="text-center py-8">
                                 <p className="text-blue-100 mb-4">
                                     {locationPermission === 'denied' 
-                                        ? '⚠️ Location access denied'
+                                        ? '📍 Location access denied'
                                         : locationPermission === 'granted'
-                                        ? 'Loading weather data...'
-                                        : 'Enable location to get weather data'}
+                                        ? '⏳ Loading weather data...'
+                                        : '📍 Enable location to get weather data'}
                                 </p>
                                 <button
                                     onClick={getLocationAndWeather}
                                     disabled={fetchingWeather}
                                     className="bg-white/30 hover:bg-white/40 text-white font-semibold py-2 px-6 rounded-xl transition-all disabled:opacity-50"
                                 >
-                                    {fetchingWeather ? '📍 Locating...' : locationPermission === 'denied' ? '🔓 Enable Location' : '📍 Fetch Weather'}
+                                    {fetchingWeather ? '🌍 Locating...' : locationPermission === 'denied' ? '🔓 Enable Location' : '📍 Fetch Weather'}
                                 </button>
                                 {locationPermission === 'denied' && (
                                     <p className="text-xs text-blue-100 mt-3">
@@ -309,10 +308,10 @@ export default function Predict(){
                     {/* Prediction Card */}
                     <div className="bg-white/10 backdrop-blur-md rounded-3xl p-8 text-white shadow-xl border border-white/20">
                         <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
-                            <span>⚡</span> Energy Prediction
+                            ⚡ Energy Prediction
                         </h2>
 
-                        <div className="space-y-4">
+                        <form onSubmit={handleSubmit} className="space-y-4">
                             <div>
                                 <label className="block text-sm font-semibold mb-2">
                                     Historical Power Consumption (kWh) - {SEQUENCE_LENGTH} values required
@@ -329,7 +328,7 @@ export default function Predict(){
                                 </p>
                             </div>
 
-                            {/* Additional Parameters */}
+                            {/* Voltage & Current */}
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
                                     <label className="block text-xs font-semibold mb-1">Voltage (V)</label>
@@ -353,7 +352,7 @@ export default function Predict(){
                                 </div>
                             </div>
 
-                            {/* Options */}
+                            {/* Auto Location Option */}
                             <div className="space-y-2 bg-white/10 rounded-xl p-4">
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input 
@@ -369,13 +368,14 @@ export default function Predict(){
                             {/* Buttons */}
                             <div className="flex gap-3 pt-2">
                                 <button
-                                    onClick={handleSubmit}
+                                    type="submit"
                                     className="flex-1 bg-white text-blue-600 font-bold py-3 rounded-xl hover:bg-blue-50 transition-all disabled:opacity-50"
                                     disabled={loading}
                                 >
                                     {loading ? '⏳ Predicting...' : '🔮 Predict Next Hour'}
                                 </button>
                                 <button
+                                    type="button"
                                     onClick={() => { 
                                         setHistoricalData(''); 
                                         setPrediction(null); 
@@ -388,7 +388,7 @@ export default function Predict(){
                                     ↻ Reset
                                 </button>
                             </div>
-                        </div>
+                        </form>
 
                         {/* Prediction Result */}
                         {prediction !== null && (
@@ -409,22 +409,23 @@ export default function Predict(){
                     </div>
                 )}
 
-                {/* Info Banner */}
+                {/* Info Section */}
                 <div className="bg-white/10 backdrop-blur-md rounded-2xl p-6 text-white border border-white/20">
                     <h3 className="font-bold mb-3 flex items-center gap-2">
-                        <span>ℹ️</span> How It Works
+                        ℹ️ How It Works
                     </h3>
                     <ul className="text-sm space-y-2 text-white/90">
                         <li>• Provide {SEQUENCE_LENGTH} historical power consumption readings (in kWh)</li>
                         <li>• Location access is automatically requested for real-time weather data</li>
                         <li>• Weather data (temperature & humidity) improves prediction accuracy</li>
+                        <li>• Voltage and current values are included for electrical analysis</li>
                         <li>• The hybrid model combines LSTM, Random Forest, and Gradient Boosted Trees</li>
                         <li>• Get accurate predictions for the next hour's energy consumption</li>
                     </ul>
                     
                     {locationPermission === 'denied' && (
                         <div className="mt-4 p-3 bg-yellow-500/20 rounded-lg border border-yellow-400/30">
-                            <p className="text-xs font-semibold mb-1">⚠️ Location Access Needed</p>
+                            <p className="text-xs font-semibold mb-1">📍 Location Access Needed</p>
                             <p className="text-xs">To enable location: Click the 🔒 icon in your browser's address bar → Site settings → Location → Allow</p>
                         </div>
                     )}

@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
@@ -10,26 +11,28 @@ import numpy as np
 import pandas as pd
 import pickle
 import os
+from datetime import datetime
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for frontend requests
 
 # --- Configuration ---
-# These paths assume the models/ directory is relative to where app.py is run
 LSTM_MODEL_PATH = os.path.join(os.getcwd(), 'models', 'lstm_energy_model.h5')
 RF_MODEL_PATH = os.path.join(os.getcwd(), 'models', 'rf_energy_model')
 GBT_MODEL_PATH = os.path.join(os.getcwd(), 'models', 'gbt_energy_model')
 SCALER_PATH = os.path.join(os.getcwd(), 'models', 'scaler.pkl')
-SEQUENCE_LENGTH = 24 # Matches the sequence_length used in prepare_lstm_data during training
+SEQUENCE_LENGTH = 24
 
-# --- Initialize Spark Session (for PySpark models) ---
-# This is a local Spark session. For production, consider a Spark cluster.
+# --- Initialize Spark Session ---
 spark = SparkSession.builder \
     .appName("EnergyForecastingAPI") \
     .config("spark.driver.memory", "4g") \
     .getOrCreate()
 
+# Suppress Spark logs
+spark.sparkContext.setLogLevel("ERROR")
+
 # --- Load Models and Scaler ---
-# Define schema for smart meter CSV data (needs to match what was used in training)
 schema = StructType([
     StructField("timestamp", TimestampType(), True),
     StructField("Power_Consumption", DoubleType(), True),
@@ -47,50 +50,44 @@ scaler = None
 try:
     print("Loading models and scaler...")
     lstm_model = tf.keras.models.load_model(LSTM_MODEL_PATH)
+    print("✓ LSTM model loaded successfully.")
+    
     with open(SCALER_PATH, 'rb') as f:
         scaler = pickle.load(f)
+    print("✓ Scaler loaded successfully.")
+    
     rf_model = PipelineModel.load(RF_MODEL_PATH)
+    print("✓ Random Forest model loaded successfully.")
+    
     gbt_model = PipelineModel.load(GBT_MODEL_PATH)
-    print("Models and scaler loaded successfully.")
-except Exception as e:  # Fixed: was "excep" instead of "except Exception as e"
-    print(f"Error loading models: {e}")
-    # In a production setup, you might want to raise the exception or exit gracefully
-    exit(1)
+    print("✓ GBT model loaded successfully.")
+    
+    print("✓ All models and scaler loaded successfully!")
+except FileNotFoundError as fe:
+    print(f"✗ Model file not found: {fe}")
+    print("Note: Models will be loaded when first requested. Continuing with API startup...")
+except Exception as e:
+    print(f"✗ Error loading models: {e}")
+    print("Note: Continuing with API startup. Models will fail at prediction time if not available.")
 
-# --- Re-implement Preprocessing and Feature Engineering Functions ---
-# These functions were designed for Spark DataFrames during training.
-# They are re-implemented here to be used with the Spark DataFrame created from API input.
+# --- Preprocessing and Feature Engineering Functions ---
 
 def preprocess_data_spark(spark_df_input):
-    """
-    Clean and prepare data for modeling (Spark DataFrame version).
-    For inference, if a small batch or single record is passed, mean/quantile aggregations
-    are computed over that batch. For robust production, pre-calculated training means/bounds
-    might be used instead.
-    """
-    # Calculate means safely
+    """Clean and prepare data for modeling"""
     temp_mean = spark_df_input.select(mean('temperature')).collect()[0][0]
     humidity_mean = spark_df_input.select(mean('humidity')).collect()[0][0]
     
     df_filled = spark_df_input.na.fill({
         'Power_Consumption': 0.0,
-        'temperature': temp_mean if temp_mean is not None else 0.0,
-        'humidity': humidity_mean if humidity_mean is not None else 0.0
+        'temperature': temp_mean if temp_mean is not None else 20.0,
+        'humidity': humidity_mean if humidity_mean is not None else 50.0
     })
 
-    # Sort by timestamp (important for lag/window features)
     df_sorted = df_filled.orderBy('timestamp')
-
-    # Outlier filtering (IQR) is omitted for inference on small datasets
-    # as it might remove the very data point being predicted or not be representative.
-    # In a production system, this would typically use bounds learned from training data.
     return df_sorted
 
 def create_features_spark(spark_df_input):
-    """
-    Create comprehensive feature set for energy forecasting (Spark DataFrame version).
-    Assumes `spark_df_input` contains enough historical points for lags and rolling windows.
-    """
+    """Create comprehensive feature set"""
     df = spark_df_input
 
     # Temporal features
@@ -112,7 +109,6 @@ def create_features_spark(spark_df_input):
         .withColumn("is_peak_hours",
                    when((col("hour") >= 17) & (col("hour") <= 21), 1).otherwise(0))
 
-    # Define window for lag features
     window_spec = Window.orderBy("timestamp")
 
     # Lag features
@@ -122,10 +118,10 @@ def create_features_spark(spark_df_input):
             lag("Power_Consumption", lag_val).over(window_spec)
         )
 
-    # Rolling window features
+    # Rolling window features (24h)
     window_24h = Window \
         .orderBy(col("timestamp").cast("long")) \
-        .rangeBetween(-24*3600, 0) # 24 hours back
+        .rangeBetween(-24*3600, 0)
 
     df = df \
         .withColumn("energy_mean_24h", avg("Power_Consumption").over(window_24h)) \
@@ -133,9 +129,10 @@ def create_features_spark(spark_df_input):
         .withColumn("energy_min_24h", min("Power_Consumption").over(window_24h)) \
         .withColumn("energy_max_24h", max("Power_Consumption").over(window_24h))
 
+    # Rolling window features (7d)
     window_7d = Window \
         .orderBy(col("timestamp").cast("long")) \
-        .rangeBetween(-7*24*3600, 0) # 7 days back
+        .rangeBetween(-7*24*3600, 0)
 
     df = df \
         .withColumn("energy_mean_7d", avg("Power_Consumption").over(window_7d)) \
@@ -146,23 +143,17 @@ def create_features_spark(spark_df_input):
         .withColumn("temp_hour_interaction", col("temperature") * col("hour")) \
         .withColumn("humidity_temp_interaction", col("humidity") * col("temperature"))
 
-    # Remove rows with null lag features. For inference, ensure enough history is provided.
     df = df.na.drop(subset=["energy_lag_1", "energy_lag_24"])
-
-    # Rename 'Power_Consumption' to 'energy_kwh' for consistency with modeling steps
     df = df.withColumnRenamed("Power_Consumption", "energy_kwh")
 
     return df
 
 def prepare_lstm_data_for_inference(spark_df_for_inference, scaler_obj, sequence_length=24):
-    """
-    Prepares a Spark DataFrame (expected to contain SEQUENCE_LENGTH records)
-    for LSTM inference. It returns the X input needed for lstm_model.predict().
-    """
+    """Prepares data for LSTM inference"""
     if spark_df_for_inference.count() < sequence_length:
         raise ValueError(f"Input data must contain at least {sequence_length} records for LSTM inference.")
 
-    pdf = spark_df_for_inference.toPandas()
+    pdf = spark_df_for_inference.orderBy('timestamp').toPandas()
 
     feature_cols = [
         'energy_kwh', 'temperature', 'humidity',
@@ -175,14 +166,12 @@ def prepare_lstm_data_for_inference(spark_df_for_inference, scaler_obj, sequence
         raise ValueError(f"Missing feature columns in input data: {missing_cols}")
 
     scaled_data = scaler_obj.transform(pdf[feature_cols])
-
-    # For inference, take the last sequence_length points as input for the next step.
-    X_inference = scaled_data[-sequence_length:].reshape(1, sequence_length, -1)
+    X_inference = scaled_data[-sequence_length:].reshape(1, sequence_length, len(feature_cols))
 
     return X_inference
 
+# --- HybridEnergyPredictor Class ---
 
-# Define the HybridEnergyPredictor class again, adapted for API use
 class HybridEnergyPredictorAPI:
     def __init__(self, lstm_model, rf_model, gbt_model, scaler):
         self.lstm_model = lstm_model
@@ -192,110 +181,154 @@ class HybridEnergyPredictorAPI:
 
     def predict_lstm(self, sequence_data):
         """Make LSTM predictions"""
+        if self.lstm_model is None:
+            raise ValueError("LSTM model not loaded")
         return self.lstm_model.predict(sequence_data, verbose=0)
 
     def predict_ensemble(self, spark_df):
         """Make ensemble predictions"""
+        if self.rf_model is None or self.gbt_model is None:
+            raise ValueError("Ensemble models not loaded")
         rf_pred = self.rf_model.transform(spark_df)
         gbt_pred = self.gbt_model.transform(spark_df)
         return rf_pred, gbt_pred
 
     def hybrid_predict(self, spark_df_input_for_features, sequence_length=24):
-        """
-        Combines LSTM and ensemble predictions for a single future point.
-        `spark_df_input_for_features` should contain at least `SEQUENCE_LENGTH` records,
-        representing the historical window to predict the next point.
-        """
-        # 1. Preprocess and create features for the Spark DataFrame input
+        """Combines LSTM and ensemble predictions"""
         featured_spark_df = create_features_spark(
             preprocess_data_spark(spark_df_input_for_features)
         )
 
-        # Ensure we have enough data after feature creation and drops
         if featured_spark_df.count() < sequence_length:
             raise ValueError(
-                "Not enough data to create all features for prediction after preprocessing. "
-                f"Required: {sequence_length} valid feature rows, Got: {featured_spark_df.count()}"
+                f"Not enough data after feature creation. Required: {sequence_length}, Got: {featured_spark_df.count()}"
             )
 
-        # Get the latest row from the featured Spark DataFrame for ensemble models
-        # Fixed: Simplified to get the last row properly
-        ensemble_input_rows = featured_spark_df.orderBy('timestamp', ascending=False).limit(1).collect()
-        ensemble_input_spark_df = spark.createDataFrame(ensemble_input_rows, schema=featured_spark_df.schema)
+        # Get latest row for ensemble models
+        latest_row = featured_spark_df.orderBy(col('timestamp').desc()).limit(1).collect()[0]
+        ensemble_input_spark_df = spark.createDataFrame([latest_row], schema=featured_spark_df.schema)
 
-        # Prepare data for LSTM prediction (requires the last `sequence_length` historical points)
+        # Prepare LSTM input (last `sequence_length` records)
         lstm_input_pdf = featured_spark_df.orderBy('timestamp').toPandas().tail(sequence_length)
-        lstm_input_spark_df_for_scaler = spark.createDataFrame(lstm_input_pdf, schema=featured_spark_df.schema)
-        X_lstm_inference = prepare_lstm_data_for_inference(
-            lstm_input_spark_df_for_scaler, self.scaler, sequence_length
-        )
+        lstm_input_spark_df = spark.createDataFrame(lstm_input_pdf, schema=featured_spark_df.schema)
+        X_lstm = prepare_lstm_data_for_inference(lstm_input_spark_df, self.scaler, sequence_length)
 
-        lstm_predictions_scaled = self.predict_lstm(X_lstm_inference)
+        # Get LSTM prediction
+        lstm_pred_scaled = self.predict_lstm(X_lstm)[0][0]
 
-        # Inverse transform LSTM prediction to original scale
-        # The scaler is for all feature_cols. The 0th col is energy_kwh. We need to create a dummy array.
+        # Inverse transform LSTM prediction
         dummy_array = np.zeros((1, self.scaler.n_features_in_))
-        dummy_array[0, 0] = lstm_predictions_scaled[0] # Put the scaled prediction in the energy_kwh slot
-        lstm_prediction_original_scale = self.scaler.inverse_transform(dummy_array)[:, 0][0]
+        dummy_array[0, 0] = lstm_pred_scaled
+        lstm_pred_original = self.scaler.inverse_transform(dummy_array)[0, 0]
 
         # Get ensemble predictions
-        rf_pred, gbt_pred = self.predict_ensemble(ensemble_input_spark_df)
-        rf_value = rf_pred.select('prediction').collect()[0]['prediction']
-        gbt_value = gbt_pred.select('prediction').collect()[0]['prediction']
+        rf_pred_df = self.rf_model.transform(ensemble_input_spark_df)
+        gbt_pred_df = self.gbt_model.transform(ensemble_input_spark_df)
+        
+        rf_value = rf_pred_df.select('prediction').collect()[0][0]
+        gbt_value = gbt_pred_df.select('prediction').collect()[0][0]
 
-        # Weighted ensemble (weights from notebook)
-        weights = {
-            'lstm': 0.5,
-            'rf': 0.25,
-            'gbt': 0.25
-        }
-
-        final_prediction = (
-            weights['lstm'] * lstm_prediction_original_scale +
+        # Weighted ensemble
+        weights = {'lstm': 0.5, 'rf': 0.25, 'gbt': 0.25}
+        final_pred = (
+            weights['lstm'] * lstm_pred_original +
             weights['rf'] * rf_value +
             weights['gbt'] * gbt_value
         )
 
-        return final_prediction
+        return final_pred
 
-# Instantiate the predictor
+# Instantiate predictor
 hybrid_predictor_api = HybridEnergyPredictorAPI(lstm_model, rf_model, gbt_model, scaler)
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """
-    API endpoint for hybrid energy consumption prediction.
-    Expects a JSON array of `SEQUENCE_LENGTH` data points (historical readings).
-    Each data point should have 'timestamp', 'Power_Consumption', 'voltage', 'current', 'temperature', 'humidity'.
-    """
-    data = request.get_json(force=True)
-
-    if not isinstance(data, list) or len(data) < SEQUENCE_LENGTH:
-        return jsonify({"error": f"Input must be a JSON array of at least {SEQUENCE_LENGTH} historical data points."}), 400
-
-    # Convert incoming JSON list of dicts to Pandas DataFrame, then Spark DataFrame
+    """Hybrid energy consumption prediction endpoint"""
     try:
-        pdf_input = pd.DataFrame(data)
-        pdf_input['timestamp'] = pd.to_datetime(pdf_input['timestamp']) # Convert timestamp strings
-        pdf_input = pdf_input[[col.name for col in schema.fields]] # Ensure column order matches schema
+        data = request.get_json()
+        
+        if data is None:
+            return jsonify({"error": "Request body must be valid JSON"}), 400
 
-        spark_df_input = spark.createDataFrame(pdf_input, schema=schema)
-    except Exception as e:
-        return jsonify({"error": f"Invalid input data format or missing columns: {e}"}), 400
+        # Frontend sends array of data point objects
+        # [{ timestamp, Power_Consumption, voltage, current, temperature, humidity }, ...]
+        if isinstance(data, list):
+            if len(data) < SEQUENCE_LENGTH:
+                return jsonify({"error": f"Input must have at least {SEQUENCE_LENGTH} data points. Received {len(data)}."}), 400
+            data_to_process = data
+        
+        # Fallback: accept dict with 'history' array (for backwards compatibility)
+        elif isinstance(data, dict) and 'history' in data:
+            history = data['history']
+            if not isinstance(history, list) or len(history) < SEQUENCE_LENGTH:
+                return jsonify({"error": f"history array must have at least {SEQUENCE_LENGTH} values"}), 400
+            
+            # Create synthetic data points
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            synthetic_data = []
+            for i, power in enumerate(history):
+                synthetic_data.append({
+                    'timestamp': (now - timedelta(hours=len(history)-i-1)).isoformat(),
+                    'Power_Consumption': float(power),
+                    'voltage': float(data.get('voltage', 230.0)),
+                    'current': float(data.get('current', 10.0)),
+                    'temperature': float(data.get('weather', {}).get('temp', 20.0)),
+                    'humidity': float(data.get('weather', {}).get('humidity', 50.0))
+                })
+            data_to_process = synthetic_data
+        else:
+            return jsonify({"error": "Request must be array of data points or dict with 'history' key"}), 400
 
-    try:
-        prediction = hybrid_predictor_api.hybrid_predict(spark_df_input, SEQUENCE_LENGTH)
-        return jsonify({"predicted_energy_kwh": float(prediction)}), 200  # Fixed: Convert to float for JSON serialization
+        print(f"Processing {len(data_to_process)} data points...")
+
+        # Convert to Spark DataFrame
+        pdf = pd.DataFrame(data_to_process)
+        
+        # Ensure timestamp is datetime
+        pdf['timestamp'] = pd.to_datetime(pdf['timestamp'])
+        
+        # Ensure numeric types
+        pdf['Power_Consumption'] = pd.to_numeric(pdf['Power_Consumption'], errors='coerce')
+        pdf['voltage'] = pd.to_numeric(pdf['voltage'], errors='coerce')
+        pdf['current'] = pd.to_numeric(pdf['current'], errors='coerce')
+        pdf['temperature'] = pd.to_numeric(pdf['temperature'], errors='coerce')
+        pdf['humidity'] = pd.to_numeric(pdf['humidity'], errors='coerce')
+        
+        # Check for NaN values
+        if pdf.isnull().any().any():
+            return jsonify({"error": "Invalid numeric values in input data"}), 400
+        
+        spark_df = spark.createDataFrame(pdf, schema=schema)
+
+        # Make prediction
+        prediction = hybrid_predictor_api.hybrid_predict(spark_df, SEQUENCE_LENGTH)
+        
+        print(f"Prediction made: {prediction}")
+        return jsonify({"prediction": float(prediction)}), 200
+
     except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
+        print(f"ValueError: {ve}")
+        return jsonify({"error": f"Invalid input: {str(ve)}"}), 400
     except Exception as e:
-        return jsonify({"error": f"Prediction failed: {e}"}), 500
+        print(f"Prediction error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
 
 @app.route('/')
 def health_check():
-    return jsonify({"status": "ok", "message": "Energy Forecasting API is running!"}), 200
+    return jsonify({
+        "status": "ok", 
+        "message": "Energy Forecasting API is running!",
+        "models_loaded": {
+            "lstm": lstm_model is not None,
+            "rf": rf_model is not None,
+            "gbt": gbt_model is not None,
+            "scaler": scaler is not None
+        }
+    }), 200
 
 if __name__ == '__main__':
-    # For local development, uncomment below. For Colab, you might use ngrok.
-    app.run(host='0.0.0.0', port=8000, debug=True)
-    print("Flask app is ready. Use 'flask run' or a WSGI server like Gunicorn to run it.")
+    print("Starting Energy Forecasting API on http://localhost:5000")
+    app.run(host='127.0.0.1', port=5050, debug=True)
