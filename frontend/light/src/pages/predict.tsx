@@ -201,7 +201,7 @@ export default function Predict(){
             })
 
             // Send data to backend
-            const res = await fetch('http://localhost:5050/predict', {
+            const res = await fetch('http://localhost:5000/predict', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(dataPoints),
@@ -229,7 +229,7 @@ export default function Predict(){
     }
 
     return(
-        <div className="min-h-screen bg-gradient-to-br from-blue-400 via-blue-500 to-purple-600 p-6">
+        <div className="min-h-screen bg-linear-to-br from-blue-400 via-blue-500 to-purple-600 p-6">
             <div className="max-w-6xl mx-auto">
                 {/* Header */}
                 <div className="text-center mb-8">
@@ -284,17 +284,17 @@ export default function Predict(){
                             <div className="text-center py-8">
                                 <p className="text-blue-100 mb-4">
                                     {locationPermission === 'denied' 
-                                        ? '📍 Location access denied'
+                                        ? ' Location access denied'
                                         : locationPermission === 'granted'
-                                        ? '⏳ Loading weather data...'
-                                        : '📍 Enable location to get weather data'}
+                                        ? ' Loading weather data...'
+                                        : ' Enable location to get weather data'}
                                 </p>
                                 <button
                                     onClick={getLocationAndWeather}
                                     disabled={fetchingWeather}
                                     className="bg-white/30 hover:bg-white/40 text-white font-semibold py-2 px-6 rounded-xl transition-all disabled:opacity-50"
                                 >
-                                    {fetchingWeather ? '🌍 Locating...' : locationPermission === 'denied' ? '🔓 Enable Location' : '📍 Fetch Weather'}
+                                    {fetchingWeather ? ' Locating...' : locationPermission === 'denied' ? ' Enable Location' : '📍 Fetch Weather'}
                                 </button>
                                 {locationPermission === 'denied' && (
                                     <p className="text-xs text-blue-100 mt-3">
@@ -308,7 +308,7 @@ export default function Predict(){
                     {/* Prediction Card */}
                     <div className="bg-white/10 backdrop-blur-md rounded-3xl p-8 text-white shadow-xl border border-white/20">
                         <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
-                            ⚡ Energy Prediction
+                             Energy Prediction
                         </h2>
 
                         <form onSubmit={handleSubmit} className="space-y-4">
@@ -372,7 +372,7 @@ export default function Predict(){
                                     className="flex-1 bg-white text-blue-600 font-bold py-3 rounded-xl hover:bg-blue-50 transition-all disabled:opacity-50"
                                     disabled={loading}
                                 >
-                                    {loading ? '⏳ Predicting...' : '🔮 Predict Next Hour'}
+                                    {loading ? ' Predicting...' : ' Predict Next Hour'}
                                 </button>
                                 <button
                                     type="button"
@@ -392,7 +392,7 @@ export default function Predict(){
 
                         {/* Prediction Result */}
                         {prediction !== null && (
-                            <div className="mt-6 bg-gradient-to-r from-green-400/20 to-blue-400/20 rounded-2xl p-6 border border-white/30">
+                            <div className="mt-6 bg-linear-to-r from-green-400/20 to-blue-400/20 rounded-2xl p-6 border border-white/30">
                                 <p className="text-sm opacity-80 mb-2">Predicted Energy Consumption</p>
                                 <p className="text-5xl font-bold mb-1">{prediction.toFixed(3)}</p>
                                 <p className="text-lg opacity-90">kWh</p>
@@ -404,7 +404,7 @@ export default function Predict(){
                 {/* Error Alert */}
                 {error && (
                     <div className="bg-red-500/80 backdrop-blur-md rounded-2xl p-4 text-white border border-red-400/50 shadow-lg mb-6">
-                        <p className="font-semibold">⚠️ Error</p>
+                        <p className="font-semibold"> Error</p>
                         <p className="text-sm mt-1">{error}</p>
                     </div>
                 )}
@@ -412,21 +412,21 @@ export default function Predict(){
                 {/* Info Section */}
                 <div className="bg-white/10 backdrop-blur-md rounded-2xl p-6 text-white border border-white/20">
                     <h3 className="font-bold mb-3 flex items-center gap-2">
-                        ℹ️ How It Works
+                         How It Works
                     </h3>
                     <ul className="text-sm space-y-2 text-white/90">
-                        <li>• Provide {SEQUENCE_LENGTH} historical power consumption readings (in kWh)</li>
-                        <li>• Location access is automatically requested for real-time weather data</li>
-                        <li>• Weather data (temperature & humidity) improves prediction accuracy</li>
-                        <li>• Voltage and current values are included for electrical analysis</li>
-                        <li>• The hybrid model combines LSTM, Random Forest, and Gradient Boosted Trees</li>
-                        <li>• Get accurate predictions for the next hour's energy consumption</li>
+                        <li> Provide {SEQUENCE_LENGTH} historical power consumption readings (in kWh)</li>
+                        <li> Location access is automatically requested for real-time weather data</li>
+                        <li> Weather data (temperature & humidity) improves prediction accuracy</li>
+                        <li> Voltage and current values are included for electrical analysis</li>
+                        <li> The hybrid model combines LSTM, Random Forest, and Gradient Boosted Trees</li>
+                        <li> Get accurate predictions for the next hour's energy consumption</li>
                     </ul>
                     
                     {locationPermission === 'denied' && (
                         <div className="mt-4 p-3 bg-yellow-500/20 rounded-lg border border-yellow-400/30">
-                            <p className="text-xs font-semibold mb-1">📍 Location Access Needed</p>
-                            <p className="text-xs">To enable location: Click the 🔒 icon in your browser's address bar → Site settings → Location → Allow</p>
+                            <p className="text-xs font-semibold mb-1"> Location Access Needed</p>
+                            <p className="text-xs">To enable location: Click the  icon in your browser's address bar → Site settings → Location → Allow</p>
                         </div>
                     )}
                 </div>
