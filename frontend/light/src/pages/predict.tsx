@@ -25,7 +25,7 @@ export default function Predict(){
     const [voltage, setVoltage] = useState('230')
     const [current, setCurrent] = useState('10')
 
-    const SEQUENCE_LENGTH = 24
+    const SEQUENCE_LENGTH = 1
 
     async function fetchWeatherByCoords(lat: number, lon: number) {
         try {
@@ -201,7 +201,7 @@ export default function Predict(){
             })
 
             // Send data to backend
-            const res = await fetch('http://localhost:5000/predict', {
+            const res = await fetch('http://localhost:5050/predict', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(dataPoints),

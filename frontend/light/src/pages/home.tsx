@@ -22,7 +22,7 @@ export default function Home(){
                     </h1>
 
                     <p className="text-white/90 max-w-2xl text-sm sm:text-base md:text-lg">
-                        Includes realtime weather analysis with our proprietary AI model to give an accurate energy forecast
+                        Includes realtime weather analysis with our proprietary ML to give an accurate energy forecast
                     </p>
 
                     <Link
